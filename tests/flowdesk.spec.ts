@@ -8,6 +8,85 @@ test.describe.serial('FlowDesk 完整链路',()=>{
  test('版本比较并恢复历史版本',async({page})=>{await page.goto('/workflows/wf-2/versions');await expect(page.getByTestId('version-compare')).toContainText('新增节点');await page.getByTestId('restore-version').click();await expect(page).toHaveURL(/\/workflows\/wf-2$/);await expect(page.getByRole('status')).toContainText('已恢复');await expect(page.getByTestId('flow-canvas')).toBeVisible();});
 });
 
+// SPA 内切换流程（整页 goto 会重建内存 store，模拟真实用户的应用内跳转）
+const openWorkflow=async(page:any,name:string)=>{
+ await page.getByRole('link',{name:'流程管理'}).click();
+ await page.getByTestId('workflow-row').filter({hasText:name}).locator('td').first().click();
+ await expect(page.getByTestId('flow-canvas')).toBeVisible();
+};
+
+test('历史恢复只进草稿工作区：已发布状态与版本记录不变，切换流程基线不丢',async({page})=>{
+  await page.goto('/workflows/wf-2');
+  await expect(page.getByTestId('publish-button')).toBeVisible();
+  await expect(page.locator('.draft-indicator')).toContainText('已发布');
+  await page.getByRole('button',{name:'版本历史'}).click();
+  await expect(page.getByTestId('version-compare')).toContainText('新增节点');
+  await page.getByTestId('restore-version').click();
+  await expect(page).toHaveURL(/\/workflows\/wf-2$/);
+  // 恢复后画布回到 v1（没有 notify 节点），并标注恢复基线
+  await expect(page.getByTestId('flow-canvas')).toBeVisible();
+  await expect(page.getByTestId('draft-baseline')).toContainText('v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  // 已发布状态不翻转为草稿，版本仍为 v2，历史记录仍是两条
+  await expect(page.locator('.draft-indicator')).toContainText('已发布 v2');
+  await page.getByRole('button',{name:'版本历史'}).click();
+  await expect(page.getByTestId('version-source-1')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/v2/}).first()).toContainText('增加金额分支与通知节点');
+  // 切到别的流程再回来，草稿仍停在同一恢复基线
+  await openWorkflow(page,'差旅费用审批');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(1);
+  await expect(page.getByTestId('draft-baseline')).toHaveCount(0);
+  await openWorkflow(page,'采购合同审批');
+  await expect(page.getByTestId('draft-baseline')).toContainText('v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+});
+
+test('两个流程交替编辑草稿不串台',async({page})=>{
+  await page.goto('/workflows/wf-2/versions');
+  await page.getByTestId('restore-version').click();
+  await expect(page.getByTestId('draft-baseline')).toContainText('v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  // 切到 wf-1 直接编辑（wf-1 种子里 condition 未配置，先补全让它成为有效草稿）
+  await openWorkflow(page,'差旅费用审批');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(1);
+  await page.getByTestId('canvas-node-approval').click();
+  await page.getByLabel('审批人来源').selectOption({label:'直属主管'});
+  // 反复横跳，两边草稿互不污染
+  await openWorkflow(page,'采购合同审批');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  await expect(page.getByTestId('draft-baseline')).toContainText('v1');
+  await openWorkflow(page,'差旅费用审批');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(1);
+  await expect(page.getByTestId('draft-baseline')).toHaveCount(0);
+  await openWorkflow(page,'采购合同审批');
+  await expect(page.getByTestId('draft-baseline')).toContainText('v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+});
+
+test('恢复基线发布生成连续新版本、结构一致并注明来源',async({page})=>{
+  await page.goto('/workflows/wf-2/versions');
+  await page.getByTestId('restore-version').click();
+  await page.getByTestId('validate-button').click();
+  await expect(page.getByTestId('error-count')).toContainText('0 错误');
+  await page.getByTestId('publish-button').click();
+  await expect(page.getByRole('status')).toContainText('发布成功');
+  // 版本连续升到 v3，基线标记随发布吸收
+  await expect(page.locator('.draft-indicator')).toContainText('已发布');
+  await expect(page.getByTestId('draft-baseline')).toHaveCount(0);
+  await page.getByRole('button',{name:'版本历史'}).click();
+  await expect(page.getByTestId('version-source-3')).toContainText('来源 v1');
+  await expect(page.getByRole('button',{name:/v3/}).first()).toContainText('恢复 v1 后发布');
+  // v3 与 v1 结构一致：以 v1 为基准、v3 为比较版本，没有新增/删除/配置变化
+  const selects=page.locator('.compare-select select');
+  await selects.nth(1).selectOption('3');
+  await expect(page.locator('.diff-summary article').nth(0)).toContainText('0');
+  await expect(page.locator('.diff-summary article').nth(1)).toContainText('0');
+  await expect(page.locator('.diff-summary article').nth(2)).toContainText('0');
+  // 原版本记录完好
+  await expect(page.locator('.version-list button',{hasText:'v1'}).last()).toContainText('初始化流程结构');
+  await expect(page.locator('.version-list button',{hasText:'v2'}).first()).toContainText('增加金额分支与通知节点');
+});
+
 test('1440px 桌面视觉与控制台验证',async({page})=>{
  const errors:string[]=[]; page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
  for(const path of ['/','/workflows/wf-1','/monitor']){await page.goto(path);await page.waitForTimeout(250);const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth);expect(overflow,`${path} 不应横向溢出`).toBeFalsy()}
