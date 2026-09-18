@@ -6,6 +6,80 @@ test.describe.serial('FlowDesk 完整链路',()=>{
  test('发布后列表和总览同步',async({page})=>{await page.goto('/workflows/wf-2');await page.getByTestId('publish-button').click();await expect(page.getByRole('status')).toContainText('发布成功');await page.getByRole('link',{name:'流程管理'}).click();const row=page.getByTestId('workflow-row').filter({hasText:'采购合同审批'});await expect(row).toContainText('已发布');await expect(row).toContainText('v3');await page.getByRole('link',{name:'总览'}).click();await expect(page.getByTestId('kpi-grid')).toBeVisible();});
  test('异常实例详情、时间线与当前节点高亮',async({page})=>{await page.goto('/monitor');await page.getByRole('button',{name:'异常',exact:true}).click();await page.getByTestId('instance-row').first().click();await expect(page.getByTestId('instance-detail')).toBeVisible();await expect(page.getByTestId('execution-timeline')).toContainText('提交申请');await expect(page.locator('.runtime-highlight')).toHaveCount(1);});
  test('版本比较并恢复历史版本',async({page})=>{await page.goto('/workflows/wf-2/versions');await expect(page.getByTestId('version-compare')).toContainText('新增节点');await page.getByTestId('restore-version').click();await expect(page).toHaveURL(/\/workflows\/wf-2$/);await expect(page.getByRole('status')).toContainText('已恢复');await expect(page.getByTestId('flow-canvas')).toBeVisible();});
+ test('恢复只改草稿：已发布状态/历史记录不变，切走再回仍停在恢复基线',async({page})=>{
+  // wf-2 为已发布流程（v2 含“高额通知”节点，v1 不含）
+  await page.goto('/workflows/wf-2/versions');
+  await page.getByTestId('restore-version').click();
+  // 草稿画布恢复到 v1：通知节点消失
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  await expect(page.getByTestId('canvas-node-condition')).toBeVisible();
+  // 已发布状态与版本指针保持不变，草稿标注恢复基线
+  await expect(page.getByTestId('draft-indicator')).toContainText('已发布 v2');
+  await expect(page.getByTestId('draft-indicator')).toContainText('恢复自 v1');
+  await expect(page.getByTestId('baseline-tag')).toHaveText('草稿基线 v1');
+  // 应用内进入版本历史：仍是 v1、v2 两条，记录未被改写
+  await page.getByRole('button',{name:/版本历史/}).click();
+  await expect(page).toHaveURL(/\/versions$/);
+  await expect(page.getByTestId('version-item')).toHaveCount(2);
+  // 切到另一个流程：wf-3 草稿不受影响（仍含通知节点）
+  await page.locator('.back-link').click();
+  await page.locator('.editor-top .icon-btn').first().click();
+  await expect(page).toHaveURL(/\/workflows$/);
+  await page.getByTestId('workflow-row').filter({hasText:'员工入职流程'}).locator('.name-cell').click();
+  await expect(page.getByTestId('flow-canvas')).toBeVisible();
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(1);
+  await expect(page.getByTestId('baseline-tag')).toHaveCount(0);
+  // 再回 wf-2：草稿仍停在同一恢复基线（v1 无通知节点），全程无整页刷新
+  await page.locator('.editor-top .icon-btn').first().click();
+  await page.getByTestId('workflow-row').filter({hasText:'采购合同审批'}).locator('.name-cell').click();
+  await expect(page.getByTestId('baseline-tag')).toHaveText('草稿基线 v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+ });
+ test('发布恢复草稿生成连续新版本：节点连线一致且历史注明来源',async({page})=>{
+  await page.goto('/workflows/wf-2/versions');
+  await page.getByTestId('restore-version').click();
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  // 发布恢复后的草稿
+  await page.getByTestId('publish-button').click();
+  await expect(page.getByRole('status')).toContainText('发布成功');
+  // 发布后草稿基线标记清除，指针推进到连续的 v3
+  await expect(page.getByTestId('draft-indicator')).toContainText('已发布 · v3');
+  await expect(page.getByTestId('baseline-tag')).toHaveCount(0);
+  // 应用内进入版本历史：追加 v3（不覆盖 v1/v2），并注明来源
+  await page.getByRole('button',{name:/版本历史/}).click();
+  await expect(page.getByTestId('version-item')).toHaveCount(3);
+  const v3=page.getByTestId('version-item').filter({hasText:'v3'});
+  await expect(v3).toContainText('由历史版本 v1 恢复后重新发布');
+  await expect(v3.getByTestId('version-source-restore')).toHaveText('恢复自 v1');
+  // v1/v2 原始记录保留；v3 与 v1 结构一致（对比视图无新增节点）
+  await expect(page.getByTestId('version-item').filter({has:page.locator('b',{hasText:/^v2$/})})).toHaveCount(1);
+  await expect(page.getByTestId('version-item').filter({has:page.locator('b',{hasText:/^v1$/})})).toHaveCount(1);
+  await expect(page.locator('.diff-summary article').first().locator('b')).toHaveText('0');
+ });
+ test('两流程交替编辑草稿不串台',async({page})=>{
+  // wf-2 恢复到 v1（无通知节点）
+  await page.goto('/workflows/wf-2/versions');
+  await page.getByTestId('restore-version').click();
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  // 应用内进入 wf-1 编辑器：wf-1 草稿不受影响（仍含通知节点、无恢复基线）
+  await page.locator('.editor-top .icon-btn').first().click();
+  await page.getByTestId('workflow-row').filter({hasText:'差旅费用审批'}).locator('.name-cell').click();
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(1);
+  await expect(page.getByTestId('baseline-tag')).toHaveCount(0);
+  // 在 wf-1 上做配置编辑
+  await page.getByTestId('canvas-node-approval').click();
+  await page.getByLabel('审批人来源').selectOption({label:'固定角色'});
+  // 切到 wf-2：其草稿仍是 v1 恢复基线
+  await page.locator('.editor-top .icon-btn').first().click();
+  await page.getByTestId('workflow-row').filter({hasText:'采购合同审批'}).locator('.name-cell').click();
+  await expect(page.getByTestId('baseline-tag')).toHaveText('草稿基线 v1');
+  await expect(page.getByTestId('canvas-node-notify')).toHaveCount(0);
+  // 再回 wf-1：其编辑内容仍在（下拉显示“固定角色”），未被 wf-2 草稿覆盖
+  await page.locator('.editor-top .icon-btn').first().click();
+  await page.getByTestId('workflow-row').filter({hasText:'差旅费用审批'}).locator('.name-cell').click();
+  await page.getByTestId('canvas-node-approval').click();
+  await expect(page.getByLabel('审批人来源')).toHaveValue('固定角色');
+ });
 });
 
 test('1440px 桌面视觉与控制台验证',async({page})=>{
